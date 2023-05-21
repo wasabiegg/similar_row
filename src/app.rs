@@ -51,6 +51,7 @@ impl LogMessage {
 struct EditDistanceSettings {
     col_idx: usize,
     similarity: usize,
+    case_sensitive: bool,
 }
 
 impl Default for EditDistanceSettings {
@@ -58,6 +59,7 @@ impl Default for EditDistanceSettings {
         Self {
             col_idx: 0,
             similarity: 100,
+            case_sensitive: true,
         }
     }
 }
@@ -120,6 +122,7 @@ impl TemplateApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // This is also where you can customize the look and feel of egui using
         // `cc.egui_ctx.set_visuals` and `cc.egui_ctx.set_fonts`.
+        setup_custom_fonts(&cc.egui_ctx);
 
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
@@ -340,6 +343,13 @@ impl eframe::App for TemplateApp {
                         );
                         ui.end_row();
 
+                        ui.label("CaseCensitive");
+                        ui.checkbox(
+                            &mut self.edit_distance_settings.case_sensitive,
+                            "CaseSensitive",
+                        );
+                        ui.end_row();
+
                         ui.label("Column");
                         egui::ComboBox::from_label("LEN")
                             .selected_text(format!(
@@ -368,7 +378,11 @@ impl eframe::App for TemplateApp {
                         .iter()
                         .map(|v| v[self.edit_distance_settings.col_idx].to_owned())
                         .collect();
-                    let res = group_by_similarity(&keys, self.edit_distance_settings.similarity);
+                    let res = group_by_similarity(
+                        &keys,
+                        self.edit_distance_settings.similarity,
+                        self.edit_distance_settings.case_sensitive,
+                    );
                     println!("Cal res: {:?}", res);
                     self.result_window.indices = Some(res);
                     self.result_window.open = true;
@@ -546,14 +560,30 @@ fn cal_similarity(left: &str, right: &str) -> usize {
     return (max_len - lev_dis) * 100 / max_len;
 }
 
-fn group_by_similarity(keys: &Vec<String>, similarity: usize) -> Vec<Vec<usize>> {
+fn cal_similarity_case_insentive(left: &str, right: &str) -> usize {
+    let left = left.to_lowercase();
+    let right = right.to_lowercase();
+    return cal_similarity(&left, &right);
+}
+
+fn group_by_similarity(
+    keys: &Vec<String>,
+    similarity: usize,
+    case_sensitive: bool,
+) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = (0..keys.len()).map(|i| vec![i]).collect();
     for group in groups.iter_mut() {
         for i in 0..keys.len() {
             if group.contains(&i) {
                 continue;
             }
-            if cal_similarity(&keys[group[0]], &keys[i]) >= similarity {
+            let cal = if case_sensitive {
+                cal_similarity
+            } else {
+                cal_similarity_case_insentive
+            };
+
+            if cal(&keys[group[0]], &keys[i]) >= similarity {
                 group.push(i);
             }
         }
@@ -585,4 +615,33 @@ fn write_table(
     }
     wtr.flush()?;
     return Ok(());
+}
+
+fn setup_custom_fonts(ctx: &egui::Context) {
+    // Start with the default fonts (we will be adding to them rather than replacing them).
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Install my own font (maybe supporting non-latin characters).
+    // .ttf and .otf files supported.
+    fonts.font_data.insert(
+        "my_font".to_owned(),
+        egui::FontData::from_static(include_bytes!("../fonts/NotoSansSC-Regular.otf")),
+    );
+
+    // Put my font first (highest priority) for proportional text:
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "my_font".to_owned());
+
+    // Put my font as last fallback for monospace:
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("my_font".to_owned());
+
+    // Tell egui to use these fonts:
+    ctx.set_fonts(fonts);
 }
