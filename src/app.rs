@@ -475,19 +475,12 @@ impl eframe::App for TemplateApp {
                         .body(|body| {
                             let row_height = text_height * 1.2;
                             // flat groups into a vec, append an empty row after every group
-                            let indices = indices
-                                .iter()
-                                .flat_map(|v| {
-                                    let mut v = v.clone();
-                                    v.push(0);
-                                    v
-                                })
-                                .collect::<Vec<usize>>();
+                            let indices = indices.iter().flatten().collect::<Vec<&usize>>();
                             body.rows(row_height, indices.len(), |idx, mut row| {
                                 row.col(|ui| {
                                     ui.label(indices[idx].to_string());
                                 });
-                                for col in &t.rows[indices[idx]] {
+                                for col in &t.rows[*indices[idx]] {
                                     row.col(|ui| {
                                         ui.label(col);
                                     });
