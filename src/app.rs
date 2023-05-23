@@ -1,7 +1,9 @@
 use crate::edit_distance::levenshtein_distance;
 use egui::RichText;
 use egui_extras::{Column, Size, StripBuilder, TableBuilder};
+use poll_promise::Promise;
 use std::path::PathBuf;
+use std::thread;
 
 use csv;
 use rfd::FileDialog;
@@ -66,7 +68,7 @@ impl Default for EditDistanceSettings {
 
 struct ResultWindow {
     open: bool,
-    indices: Option<Vec<Vec<usize>>>,
+    indices: Option<Promise<Vec<Vec<usize>>>>,
 }
 impl Default for ResultWindow {
     fn default() -> Self {
@@ -164,17 +166,15 @@ impl TemplateApp {
                     });
                 }
             })
-            .body(|mut body| {
-                for r in &t.rows {
-                    let row_height = text_height * 1.2;
-                    body.row(row_height, |mut row| {
-                        for col in r {
-                            row.col(|ui| {
-                                ui.label(col);
-                            });
-                        }
-                    });
-                }
+            .body(|body| {
+                let row_height = text_height * 1.2;
+                body.rows(row_height, t.rows.len(), |idx, mut row| {
+                    for col in &t.rows[idx] {
+                        row.col(|ui| {
+                            ui.label(col);
+                        });
+                    }
+                })
             });
     }
 }
@@ -372,20 +372,32 @@ impl eframe::App for TemplateApp {
                 });
 
             if let Some(t) = &self.table {
-                if ui.button("Cal similarity").clicked() {
-                    let keys: Vec<String> = t
-                        .rows
-                        .iter()
-                        .map(|v| v[self.edit_distance_settings.col_idx].to_owned())
-                        .collect();
-                    let res = group_by_similarity(
-                        &keys,
-                        self.edit_distance_settings.similarity,
-                        self.edit_distance_settings.case_sensitive,
-                    );
-                    println!("Cal res: {:?}", res);
-                    self.result_window.indices = Some(res);
-                    self.result_window.open = true;
+                ui.horizontal(|ui| {
+                    if ui.button("Cal similarity").clicked() {
+                        let keys: Vec<String> = t
+                            .rows
+                            .iter()
+                            .map(|v| v[self.edit_distance_settings.col_idx].to_owned())
+                            .collect();
+
+                        let ctx = ctx.clone();
+                        let (sender, promise) = Promise::new();
+                        self.result_window.indices = Some(promise);
+                        let similarity = self.edit_distance_settings.similarity;
+                        let case_sensitive = self.edit_distance_settings.case_sensitive;
+
+                        thread::spawn(move || {
+                            let res = group_by_similarity_v2(&keys, similarity, case_sensitive);
+                            sender.send(res);
+                            ctx.request_repaint();
+                        });
+                    }
+                });
+                if let Some(task) = &self.result_window.indices {
+                    if task.ready().is_none() {
+                        ui.label("Calculating...");
+                        ui.spinner();
+                    }
                 }
             }
 
@@ -413,9 +425,9 @@ impl eframe::App for TemplateApp {
                 });
         });
 
-        // Result display window
-        if let Some(indices) = &self.result_window.indices {
-            if let Some(t) = &self.table {
+        if let Some(task) = &self.result_window.indices {
+            if let Some(indices) = task.ready() {
+                self.result_window.open = true;
                 let mut window = egui::Window::new("Result")
                     .resizable(true)
                     .collapsible(true)
@@ -425,7 +437,7 @@ impl eframe::App for TemplateApp {
                 window = window.open(&mut self.result_window.open);
                 window.show(ctx, |ui| {
                     // Show result table
-                    if self.table.is_none() || self.result_window.indices.is_none() {
+                    if self.table.is_none() {
                         return;
                     }
                     let t = self.table.as_ref().unwrap();
@@ -460,28 +472,27 @@ impl eframe::App for TemplateApp {
                                 });
                             }
                         })
-                        .body(|mut body| {
-                            for group in indices {
-                                let row_height = text_height * 1.2;
-                                for r_idx in group {
-                                    body.row(row_height, |mut row| {
-                                        row.col(|ui| {
-                                            ui.label(r_idx.to_string());
-                                        });
-                                        for col in &t.rows[*r_idx] {
-                                            row.col(|ui| {
-                                                ui.label(col);
-                                            });
-                                        }
+                        .body(|body| {
+                            let row_height = text_height * 1.2;
+                            // flat groups into a vec, append an empty row after every group
+                            let indices = indices
+                                .iter()
+                                .flat_map(|v| {
+                                    let mut v = v.clone();
+                                    v.push(0);
+                                    v
+                                })
+                                .collect::<Vec<usize>>();
+                            body.rows(row_height, indices.len(), |idx, mut row| {
+                                row.col(|ui| {
+                                    ui.label(indices[idx].to_string());
+                                });
+                                for col in &t.rows[indices[idx]] {
+                                    row.col(|ui| {
+                                        ui.label(col);
                                     });
                                 }
-                                // Empty row
-                                body.row(row_height, |mut row| {
-                                    row.col(|ui| {
-                                        ui.label("");
-                                    });
-                                });
-                            }
+                            });
                         });
 
                     ui.separator();
@@ -566,6 +577,7 @@ fn cal_similarity_case_insentive(left: &str, right: &str) -> usize {
     return cal_similarity(&left, &right);
 }
 
+#[allow(dead_code)]
 fn group_by_similarity(
     keys: &Vec<String>,
     similarity: usize,
@@ -585,6 +597,33 @@ fn group_by_similarity(
 
             if cal(&keys[group[0]], &keys[i]) >= similarity {
                 group.push(i);
+            }
+        }
+    }
+    return groups;
+}
+
+fn group_by_similarity_v2(
+    keys: &Vec<String>,
+    similarity: usize,
+    case_sensitive: bool,
+) -> Vec<Vec<usize>> {
+    let mut groups: Vec<Vec<usize>> = (0..keys.len()).map(|i| vec![i]).collect();
+    let mut visited: Vec<bool> = vec![false; keys.len()];
+    for group in groups.iter_mut() {
+        for i in 0..keys.len() {
+            if group.contains(&i) || visited[i] {
+                continue;
+            }
+            let cal = if case_sensitive {
+                cal_similarity
+            } else {
+                cal_similarity_case_insentive
+            };
+
+            if cal(&keys[group[0]], &keys[i]) >= similarity {
+                group.push(i);
+                visited[i] = true;
             }
         }
     }
